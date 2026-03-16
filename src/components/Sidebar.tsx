@@ -43,7 +43,7 @@ export default function Sidebar() {
     return (
       <div className="w-[380px] min-w-[380px] border-l border-br bg-s1 flex flex-col overflow-hidden">
         <div className="px-4 py-3 border-b border-br">
-          <div className="text-[13px] font-semibold text-blue">Select a Game</div>
+          <div className="text-[13px] font-semibold text-white">Select a Game</div>
           <div className="text-[10px] text-tx3 mt-0.5">Click any matchup to see analytics</div>
         </div>
         <div className="flex-1 flex flex-col items-center justify-center text-center px-6 text-tx3">

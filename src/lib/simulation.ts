@@ -1,10 +1,8 @@
 import { SimResult } from "@/types";
 import { getTeam } from "@/data/teams";
 import { MATCHUPS, EAST_R1, WEST_R1, MIDWEST_R1, SOUTH_R1 } from "@/data/matchups";
-
 function rnd(min: number, max: number) { return min + Math.random() * (max - min); }
 function noise(v: number) { return (Math.random() - 0.5) * 2 * v; }
-
 function randomWeights() {
   const raw: Record<string,number> = {
     efficiency: rnd(0.15, 0.50),
@@ -21,7 +19,6 @@ function randomWeights() {
   for (const [k, v] of Object.entries(raw)) w[k] = v / total;
   return w;
 }
-
 function gameWinProb(t1: string, t2: string, w: Record<string,number>): number {
   const d1 = getTeam(t1);
   const d2 = getTeam(t2);
@@ -44,7 +41,6 @@ function gameWinProb(t1: string, t2: string, w: Record<string,number>): number {
     exp    * w.experience;
   return 1 / (1 + Math.exp(-composite / 14));
 }
-
 function simGame(t1: string, t2: string, w: Record<string,number>): string {
   if (!t1 || !t2) return t1 || t2;
   let p = gameWinProb(t1, t2, w);
@@ -57,7 +53,6 @@ function simGame(t1: string, t2: string, w: Record<string,number>): string {
   p = Math.max(0.03, Math.min(0.97, p));
   return Math.random() < p ? t1 : t2;
 }
-
 function simRegion(r1ids: string[], w: Record<string,number>): string {
   const r1w = r1ids.map(id => { const m = MATCHUPS[id]; return simGame(m.t1, m.t2, w); });
   const r2: string[] = [];
@@ -65,7 +60,6 @@ function simRegion(r1ids: string[], w: Record<string,number>): string {
   const s16 = [simGame(r2[0], r2[1], w), simGame(r2[2], r2[3], w)];
   return simGame(s16[0], s16[1], w);
 }
-
 export function runSimulation(n: number): SimResult {
   const champs: Record<string,number> = {};
   const f4:     Record<string,number> = {};
@@ -83,7 +77,6 @@ export function runSimulation(n: number): SimResult {
   }
   return { champs, f4, n };
 }
-
 export function sortedEntries(obj: Record<string,number>, top: number) {
   return Object.entries(obj).sort(([,a],[,b]) => b-a).slice(0, top);
 }

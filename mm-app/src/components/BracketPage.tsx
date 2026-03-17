@@ -4,6 +4,7 @@ import { useBracket } from "@/store/useBracket";
 import RegionGrid from "@/components/RegionGrid";
 import FinalFour from "@/components/FinalFour";
 import Sidebar from "@/components/Sidebar";
+import FirstFourPanel from "@/components/FirstFourPanel";
 import { EAST_R1, SOUTH_R1, WEST_R1, MIDWEST_R1 } from "@/data/matchups";
 import { BracketPage as BracketPageType } from "@/types";
 
@@ -18,6 +19,10 @@ export default function BracketPage() {
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
+
+      {/* First Four panel — always visible at top */}
+      <FirstFourPanel />
+
       {/* Sub-tabs */}
       <div className="h-9 flex-shrink-0 flex items-center gap-1 px-3 bg-s1 border-b border-br no-select">
         {PAGES.map(p => (

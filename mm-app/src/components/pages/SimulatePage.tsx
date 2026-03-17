@@ -3,16 +3,19 @@
 import { useState } from "react";
 import { runSimulation, sortedEntries, FullSimResult, ENV_META } from "@/lib/simulation";
 import { getTeam } from "@/data/teams";
+import { useBracket } from "@/store/useBracket";
 
 export default function SimulatePage() {
   const [result, setResult] = useState<FullSimResult | null>(null);
   const [running, setRunning] = useState(false);
   const [count, setCount] = useState(5000);
+  const { picks } = useBracket();
 
   function handleRun() {
     setRunning(true);
+    const pickSnapshot = { ...picks };
     setTimeout(() => {
-      setResult(runSimulation(count));
+      setResult(runSimulation(count, pickSnapshot));
       setRunning(false);
     }, 80);
   }

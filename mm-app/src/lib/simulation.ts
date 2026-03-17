@@ -154,11 +154,18 @@ function buildWeights(env: EnvProfile): WeightProfile {
 
   // Normalize so weights sum to 1
   const total = Object.values(raw).reduce((a, b) => a + b, 0);
-  const w: WeightProfile = {} as WeightProfile;
-  for (const [k, v] of Object.entries(raw)) {
-    (w as Record<string, number>)[k] = v / total;
-  }
-  return w;
+  return {
+    efficiency:  raw.efficiency  / total,
+    offense:     raw.offense     / total,
+    defense:     raw.defense     / total,
+    shooting3:   raw.shooting3   / total,
+    turnover:    raw.turnover    / total,
+    rebounding:  raw.rebounding  / total,
+    pace:        raw.pace        / total,
+    experience:  raw.experience  / total,
+    ft:          raw.ft          / total,
+    sos:         raw.sos         / total,
+  };
 }
 
 /* ================================================================

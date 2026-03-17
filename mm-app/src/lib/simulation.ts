@@ -1,304 +1,428 @@
+/**
+ * SIMULATION ENGINE — 40+ Factor Multi-Metric Tournament Model
+ * =============================================================
+ * Uses derived stats (see derived.ts) across 10 statistical categories.
+ * Each simulation run gets a randomized environment + weight profile.
+ * Game-level variance comes from 6 independent noise sources.
+ */
+
 import { SimResult } from "@/types";
 import { getTeam } from "@/data/teams";
+import { deriveStats, ExtendedStats } from "@/lib/derived";
 import { MATCHUPS, EAST_R1, WEST_R1, MIDWEST_R1, SOUTH_R1 } from "@/data/matchups";
-import { matchupWinProb } from "@/lib/analytics";
 
-/* ================================================================
-   HELPERS
-================================================================ */
 function rnd(min: number, max: number) { return min + Math.random() * (max - min); }
 function noise(scale: number) { return (Math.random() - 0.5) * 2 * scale; }
+function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
 
 /* ================================================================
-   TOURNAMENT ENVIRONMENT
-   Every simulation run picks a random environment.
-   This changes which stats the engine weights most that run.
-
-   Environments:
-   - chalk:         favorites dominate, small variance
-   - chaos:         massive upsets, anything goes
-   - defense:       low-scoring grind-it-out tournament
-   - shooting:      3PT variance decides every game
-   - rebounding:    second-chance points and physicality rule
-   - turnover:      ball security and pressure defense dominate
-   - experience:    veteran teams and high KenPom teams thrive
-   - guard_play:    tempo and perimeter play decide outcomes
+   TOURNAMENT ENVIRONMENTS
+   8 distinct environments, each changing how categories are weighted.
 ================================================================ */
-type Environment = "chalk" | "chaos" | "defense" | "shooting" | "rebounding" | "turnover" | "experience" | "guard_play";
+export type Environment =
+  | "balanced"
+  | "chalk"
+  | "chaos"
+  | "defense"
+  | "shooting"
+  | "rebounding"
+  | "turnover"
+  | "experience"
+  | "guard_play"
+  | "interior";
 
-interface EnvProfile {
-  name: Environment;
-  // Weight multipliers for each factor (applied on top of base weights)
-  efficiencyMult:  number;  // adjusted efficiency margin
-  offenseMult:     number;  // raw offensive efficiency
-  defenseMult:     number;  // raw defensive efficiency
-  shooting3Mult:   number;  // 3PT shooting matchup
-  turnoverMult:    number;  // turnover differential
-  reboundingMult:  number;  // offensive rebounding
-  paceMult:        number;  // pace advantage
-  experienceMult:  number;  // KenPom experience proxy
-  ftMult:          number;  // free throw / drawing fouls proxy (aO sub-factor)
-  sosMult:         number;  // strength of schedule proxy (kp rank)
+export const ENV_META: Record<Environment, { label: string; desc: string; color: string }> = {
+  balanced:   { label:"Balanced",    desc:"All factors weighted evenly — typical tournament",      color:"text-blue" },
+  chalk:      { label:"Chalk",       desc:"Favorites dominate, low variance",                     color:"text-blue" },
+  chaos:      { label:"Chaos",       desc:"Massive upsets, anything can happen",                  color:"text-red" },
+  defense:    { label:"Defense",     desc:"Low-scoring grind — defense decides every game",       color:"text-grn" },
+  shooting:   { label:"Shooting",    desc:"3PT variance rules — hot teams go deep",                color:"text-gld" },
+  rebounding: { label:"Rebounding",  desc:"Second chance points and physicality dominate",        color:"text-purple" },
+  turnover:   { label:"Turnover",    desc:"Ball security and pressure defense decide outcomes",   color:"text-red" },
+  experience: { label:"Experience",  desc:"Veteran programs and coaches win in March",             color:"text-blue" },
+  guard_play: { label:"Guard Play",  desc:"Perimeter play and tempo control everything",          color:"text-gld" },
+  interior:   { label:"Interior",    desc:"Paint scoring, rim protection, and post play rule",    color:"text-grn" },
+};
+
+interface EnvWeights {
+  // Each number is a multiplier on the base random weight draw
+  efficiency:   number;
+  shooting:     number;
+  shootingVar:  number;
+  turnovers:    number;
+  rebounding:   number;
+  freeThrow:    number;
+  interior:     number;
+  pace:         number;
+  sos:          number;
+  experience:   number;
   // Variance controls
-  gameNoise:       number;  // base game-level noise (higher = more upsets)
-  shootingNoise:   number;  // hot/cold 3PT night variance
-  turnoverNoise:   number;  // TO swing variance
-  foulNoise:       number;  // foul trouble / FT variance
-  reboundNoise:    number;  // rebounding swing variance
-  cinderellaBoost: number;  // extra upset probability for lower seeds
+  baseNoise:    number;  // Game-level randomness
+  shotNoise:    number;  // Hot/cold shooting night
+  toNoise:      number;  // Turnover swings
+  foulNoise:    number;  // Foul trouble variance
+  rebNoise:     number;  // Rebounding swings
+  cinderella:   number;  // Upset boost for lower seeds
+  scaleFactor:  number;  // Logistic curve scale (higher = flatter/more upsets)
 }
 
-function pickEnvironment(): EnvProfile {
-  const envs: EnvProfile[] = [
-    {
-      name: "chalk",
-      efficiencyMult: 1.6, offenseMult: 1.3, defenseMult: 1.3,
-      shooting3Mult: 0.6,  turnoverMult: 0.7, reboundingMult: 0.7,
-      paceMult: 0.5,       experienceMult: 1.4, ftMult: 1.1, sosMult: 1.5,
-      gameNoise: 0.10, shootingNoise: 0.08, turnoverNoise: 0.06,
-      foulNoise: 0.05, reboundNoise: 0.05, cinderellaBoost: 0.02,
-    },
-    {
-      name: "chaos",
-      efficiencyMult: 0.6, offenseMult: 0.7, defenseMult: 0.7,
-      shooting3Mult: 1.5,  turnoverMult: 1.5, reboundingMult: 1.2,
-      paceMult: 1.0,       experienceMult: 0.5, ftMult: 1.2, sosMult: 0.4,
-      gameNoise: 0.38, shootingNoise: 0.35, turnoverNoise: 0.28,
-      foulNoise: 0.20, reboundNoise: 0.20, cinderellaBoost: 0.14,
-    },
-    {
-      name: "defense",
-      efficiencyMult: 1.1, offenseMult: 0.7, defenseMult: 2.0,
-      shooting3Mult: 0.8,  turnoverMult: 1.3, reboundingMult: 1.2,
-      paceMult: 0.6,       experienceMult: 1.2, ftMult: 0.9, sosMult: 1.1,
-      gameNoise: 0.16, shootingNoise: 0.14, turnoverNoise: 0.18,
-      foulNoise: 0.12, reboundNoise: 0.12, cinderellaBoost: 0.05,
-    },
-    {
-      name: "shooting",
-      efficiencyMult: 0.9, offenseMult: 1.4, defenseMult: 0.7,
-      shooting3Mult: 2.2,  turnoverMult: 0.7, reboundingMult: 0.8,
-      paceMult: 1.1,       experienceMult: 0.8, ftMult: 1.0, sosMult: 0.8,
-      gameNoise: 0.28, shootingNoise: 0.40, turnoverNoise: 0.10,
-      foulNoise: 0.10, reboundNoise: 0.08, cinderellaBoost: 0.10,
-    },
-    {
-      name: "rebounding",
-      efficiencyMult: 1.0, offenseMult: 0.9, defenseMult: 1.0,
-      shooting3Mult: 0.7,  turnoverMult: 0.9, reboundingMult: 2.4,
-      paceMult: 0.8,       experienceMult: 1.0, ftMult: 1.3, sosMult: 0.9,
-      gameNoise: 0.18, shootingNoise: 0.10, turnoverNoise: 0.12,
-      foulNoise: 0.18, reboundNoise: 0.32, cinderellaBoost: 0.06,
-    },
-    {
-      name: "turnover",
-      efficiencyMult: 0.9, offenseMult: 0.8, defenseMult: 1.2,
-      shooting3Mult: 0.9,  turnoverMult: 2.6, reboundingMult: 1.0,
-      paceMult: 0.9,       experienceMult: 1.1, ftMult: 1.0, sosMult: 0.8,
-      gameNoise: 0.22, shootingNoise: 0.12, turnoverNoise: 0.36,
-      foulNoise: 0.14, reboundNoise: 0.10, cinderellaBoost: 0.08,
-    },
-    {
-      name: "experience",
-      efficiencyMult: 1.2, offenseMult: 1.0, defenseMult: 1.0,
-      shooting3Mult: 1.0,  turnoverMult: 1.0, reboundingMult: 1.0,
-      paceMult: 0.8,       experienceMult: 2.8, ftMult: 1.2, sosMult: 2.0,
-      gameNoise: 0.14, shootingNoise: 0.10, turnoverNoise: 0.10,
-      foulNoise: 0.08, reboundNoise: 0.08, cinderellaBoost: 0.03,
-    },
-    {
-      name: "guard_play",
-      efficiencyMult: 1.0, offenseMult: 1.2, defenseMult: 0.9,
-      shooting3Mult: 1.6,  turnoverMult: 1.8, reboundingMult: 0.6,
-      paceMult: 1.6,       experienceMult: 0.9, ftMult: 1.1, sosMult: 0.9,
-      gameNoise: 0.24, shootingNoise: 0.28, turnoverNoise: 0.26,
-      foulNoise: 0.16, reboundNoise: 0.06, cinderellaBoost: 0.09,
-    },
-  ];
+const ENV_WEIGHTS: Record<Environment, EnvWeights> = {
+  balanced: {
+    efficiency:1.0, shooting:1.0, shootingVar:1.0, turnovers:1.0, rebounding:1.0,
+    freeThrow:1.0, interior:1.0, pace:1.0, sos:1.0, experience:1.0,
+    baseNoise:0.18, shotNoise:0.20, toNoise:0.14, foulNoise:0.10, rebNoise:0.12,
+    cinderella:0.06, scaleFactor:12,
+  },
+  chalk: {
+    efficiency:2.0, shooting:0.8, shootingVar:0.4, turnovers:0.7, rebounding:0.7,
+    freeThrow:0.9, interior:1.0, pace:0.5, sos:1.8, experience:1.6,
+    baseNoise:0.08, shotNoise:0.07, toNoise:0.06, foulNoise:0.04, rebNoise:0.05,
+    cinderella:0.02, scaleFactor:8,
+  },
+  chaos: {
+    efficiency:0.5, shooting:1.2, shootingVar:2.5, turnovers:1.8, rebounding:1.2,
+    freeThrow:1.2, interior:0.8, pace:1.1, sos:0.3, experience:0.4,
+    baseNoise:0.40, shotNoise:0.45, toNoise:0.32, foulNoise:0.24, rebNoise:0.22,
+    cinderella:0.18, scaleFactor:18,
+  },
+  defense: {
+    efficiency:1.2, shooting:0.6, shootingVar:0.7, turnovers:1.4, rebounding:1.3,
+    freeThrow:1.1, interior:1.4, pace:0.6, sos:1.2, experience:1.3,
+    baseNoise:0.14, shotNoise:0.12, toNoise:0.20, foulNoise:0.16, rebNoise:0.14,
+    cinderella:0.04, scaleFactor:10,
+  },
+  shooting: {
+    efficiency:0.8, shooting:2.4, shootingVar:2.8, turnovers:0.6, rebounding:0.7,
+    freeThrow:0.9, interior:0.6, pace:1.2, sos:0.7, experience:0.7,
+    baseNoise:0.26, shotNoise:0.50, toNoise:0.08, foulNoise:0.08, rebNoise:0.07,
+    cinderella:0.12, scaleFactor:16,
+  },
+  rebounding: {
+    efficiency:0.9, shooting:0.7, shootingVar:0.7, turnovers:0.8, rebounding:2.8,
+    freeThrow:1.5, interior:2.0, pace:0.7, sos:0.9, experience:1.1,
+    baseNoise:0.16, shotNoise:0.10, toNoise:0.10, foulNoise:0.22, rebNoise:0.36,
+    cinderella:0.05, scaleFactor:11,
+  },
+  turnover: {
+    efficiency:0.8, shooting:0.8, shootingVar:0.9, turnovers:3.0, rebounding:0.9,
+    freeThrow:1.0, interior:0.8, pace:1.0, sos:0.7, experience:1.1,
+    baseNoise:0.20, shotNoise:0.10, toNoise:0.42, foulNoise:0.12, rebNoise:0.10,
+    cinderella:0.08, scaleFactor:13,
+  },
+  experience: {
+    efficiency:1.2, shooting:0.9, shootingVar:0.6, turnovers:1.0, rebounding:1.0,
+    freeThrow:1.2, interior:1.1, pace:0.8, sos:2.2, experience:3.2,
+    baseNoise:0.12, shotNoise:0.08, toNoise:0.08, foulNoise:0.07, rebNoise:0.08,
+    cinderella:0.03, scaleFactor:9,
+  },
+  guard_play: {
+    efficiency:0.9, shooting:1.8, shootingVar:1.8, turnovers:2.0, rebounding:0.5,
+    freeThrow:1.1, interior:0.5, pace:1.8, sos:0.9, experience:0.9,
+    baseNoise:0.22, shotNoise:0.32, toNoise:0.28, foulNoise:0.14, rebNoise:0.06,
+    cinderella:0.10, scaleFactor:14,
+  },
+  interior: {
+    efficiency:1.0, shooting:0.6, shootingVar:0.7, turnovers:0.9, rebounding:2.0,
+    freeThrow:1.8, interior:3.0, pace:0.7, sos:1.0, experience:1.2,
+    baseNoise:0.15, shotNoise:0.08, toNoise:0.10, foulNoise:0.26, rebNoise:0.24,
+    cinderella:0.04, scaleFactor:10,
+  },
+};
 
+function pickEnvironment(): Environment {
+  const envs = Object.keys(ENV_WEIGHTS) as Environment[];
   return envs[Math.floor(Math.random() * envs.length)];
 }
 
 /* ================================================================
-   PER-RUN WEIGHT PROFILE
-   Even within the same environment, weights get randomized
-   so no two simulations are identical.
+   WEIGHT PROFILE
+   10 category weights, drawn randomly within env-modified ranges,
+   normalized to sum to 1.
 ================================================================ */
-interface WeightProfile {
-  efficiency:  number;
-  offense:     number;
-  defense:     number;
-  shooting3:   number;
-  turnover:    number;
-  rebounding:  number;
-  pace:        number;
-  experience:  number;
-  ft:          number;
-  sos:         number;
+interface CategoryWeights {
+  efficiency:   number;
+  shooting:     number;
+  shootingVar:  number;
+  turnovers:    number;
+  rebounding:   number;
+  freeThrow:    number;
+  interior:     number;
+  pace:         number;
+  sos:          number;
+  experience:   number;
 }
 
-function buildWeights(env: EnvProfile): WeightProfile {
-  // Base random draw for each factor
-  const raw: WeightProfile = {
-    efficiency:  rnd(0.12, 0.40) * env.efficiencyMult,
-    offense:     rnd(0.04, 0.18) * env.offenseMult,
-    defense:     rnd(0.04, 0.20) * env.defenseMult,
-    shooting3:   rnd(0.04, 0.20) * env.shooting3Mult,
-    turnover:    rnd(0.04, 0.18) * env.turnoverMult,
-    rebounding:  rnd(0.03, 0.16) * env.reboundingMult,
-    pace:        rnd(0.01, 0.10) * env.paceMult,
-    experience:  rnd(0.02, 0.14) * env.experienceMult,
-    ft:          rnd(0.02, 0.10) * env.ftMult,
-    sos:         rnd(0.02, 0.12) * env.sosMult,
-  };
+// Target weight ranges per category (before env multiplier)
+const BASE_RANGES: Record<keyof CategoryWeights, [number, number]> = {
+  efficiency:  [0.14, 0.28],
+  shooting:    [0.08, 0.18],
+  shootingVar: [0.05, 0.12],
+  turnovers:   [0.06, 0.12],
+  rebounding:  [0.06, 0.12],
+  freeThrow:   [0.04, 0.10],
+  interior:    [0.04, 0.10],
+  pace:        [0.03, 0.08],
+  sos:         [0.03, 0.07],
+  experience:  [0.03, 0.07],
+};
 
-  // Normalize so weights sum to 1
+function buildWeights(env: EnvWeights): CategoryWeights {
+  const raw: Record<string, number> = {};
+  for (const [cat, [lo, hi]] of Object.entries(BASE_RANGES)) {
+    const mult = (env as unknown as Record<string, number>)[cat] ?? 1;
+    raw[cat] = rnd(lo, hi) * mult;
+  }
   const total = Object.values(raw).reduce((a, b) => a + b, 0);
-  return {
-    efficiency:  raw.efficiency  / total,
-    offense:     raw.offense     / total,
-    defense:     raw.defense     / total,
-    shooting3:   raw.shooting3   / total,
-    turnover:    raw.turnover    / total,
-    rebounding:  raw.rebounding  / total,
-    pace:        raw.pace        / total,
-    experience:  raw.experience  / total,
-    ft:          raw.ft          / total,
-    sos:         raw.sos         / total,
-  };
+  const w: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw)) w[k] = v / total;
+  return w as unknown as CategoryWeights;
 }
 
 /* ================================================================
-   COMPOSITE GAME WIN PROBABILITY
-   10 factors, weighted by current run's profile + environment.
+   CATEGORY SCORES
+   Each category returns a signed score: positive = t1 advantage.
+   All inputs are ExtendedStats.
 ================================================================ */
-function computeWinProb(t1: string, t2: string, w: WeightProfile): number {
-  const d1 = getTeam(t1);
-  const d2 = getTeam(t2);
 
-  // Factor 1: Adjusted Efficiency Margin (both-direction net)
-  const effMargin = (d1.aO - d2.aD) - (d2.aO - d1.aD);
+function scoreEfficiency(a: ExtendedStats, b: ExtendedStats): number {
+  // Adjusted efficiency margin (both directions)
+  const netMargin = (a.aO - b.aD) - (b.aO - a.aD);
+  // Net rating gap
+  const netGap = a.netRating - b.netRating;
+  // Combine
+  return netMargin * 0.7 + netGap * 0.3;
+}
 
-  // Factor 2: Raw Offensive Efficiency gap
-  const offGap = d1.aO - d2.aO;
+function scoreShooting(a: ExtendedStats, b: ExtendedStats): number {
+  // eFG% gap × 50 (so 2% gap = 1 point)
+  const eFGgap  = (a.eFGpct - b.eFGpct) * 50;
+  // TS% gap
+  const tsgap   = (a.tsPct  - b.tsPct)  * 40;
+  // 3PT% vs opponent 3PT defense (style interaction)
+  const shoot3  = (a.threePct - b.opp3Pct) - (b.threePct - a.opp3Pct);
+  return eFGgap * 0.4 + tsgap * 0.3 + shoot3 * 0.3;
+}
 
-  // Factor 3: Raw Defensive Efficiency gap (lower adjD = better)
-  const defGap = d2.aD - d1.aD;
+function scoreShootingVariance(a: ExtendedStats, b: ExtendedStats): number {
+  // Teams with higher 3PT attempt rates have more variance
+  // In shooting environments this is a bigger factor
+  const arGap    = (a.threeAR - b.threeAR) * 10;
+  // Opponent 3PT defense quality
+  const oppDef3  = (b.opp3Pct - a.opp3Pct) * 2;  // higher = worse defense
+  return arGap * 0.5 + oppDef3 * 0.5;
+}
 
-  // Factor 4: 3PT Shooting matchup
-  // Combines shooter rate vs opponent defense quality
-  const shoot3 = (d1.t3 - d2.t3) * 1.6;
+function scoreTurnovers(a: ExtendedStats, b: ExtendedStats): number {
+  // Direct TO rate (lower is better — flip sign)
+  const toRateEdge = (b.toRate - a.toRate) * 1.5;
+  // Defensive TO forcing
+  const defTOedge  = (a.defTOrate - b.defTOrate) * 1.2;
+  // TO margin
+  const marginEdge = (a.toMargin - b.toMargin) * 0.8;
+  // Steal rate edge
+  const stealEdge  = (a.stealRate - b.stealRate) * 0.5;
+  return toRateEdge + defTOedge + marginEdge + stealEdge;
+}
 
-  // Factor 5: Turnover differential
-  // Higher opponent TO rate = more turnovers we force
-  const toEdge = (d2.to - d1.to) * 2.0;
+function scoreRebounding(a: ExtendedStats, b: ExtendedStats): number {
+  // Offensive rebounding vs opponent defensive rebounding
+  const oRebEdge = (a.oRebPct - b.oppORebPct) - (b.oRebPct - a.oppORebPct);
+  // Total rebound % gap
+  const totEdge  = (a.totRebPct - b.totRebPct) * 0.5;
+  // Second chance points
+  const scEdge   = (a.secondChancePts - b.secondChancePts) * 0.8;
+  return oRebEdge * 0.5 + totEdge * 0.3 + scEdge * 0.2;
+}
 
-  // Factor 6: Offensive Rebounding advantage
-  const rebEdge = (d1.oR - d2.oR) * 0.9;
+function scoreFreeThrow(a: ExtendedStats, b: ExtendedStats): number {
+  // FT rate advantage (getting to the line)
+  const ftRateEdge = (a.ftRate - b.ftRate) * 15;
+  // FT% gap
+  const ftPctEdge  = (a.ftPct  - b.ftPct)  * 10;
+  // Drawing fouls vs opponent foul discipline
+  const foulEdge   = (b.oppFoulRate - a.oppFoulRate) * 10;
+  return ftRateEdge * 0.4 + ftPctEdge * 0.3 + foulEdge * 0.3;
+}
 
-  // Factor 7: Pace control advantage
-  // Faster tempo slightly favors the faster team (more possessions = variance)
-  const paceEdge = (d1.tp - d2.tp) * 0.04;
+function scoreInterior(a: ExtendedStats, b: ExtendedStats): number {
+  // Rim finishing vs opponent rim defense
+  const rimEdge    = (a.rimFinish - b.oppRimFG) - (b.rimFinish - a.oppRimFG);
+  // Block rate (rejection vs getting blocked)
+  const blockEdge  = (a.blockRate - b.oppBlockRate) * 0.3;
+  // Paint points per possession
+  const paintEdge  = (a.paintPts - b.paintPts) * 2;
+  return rimEdge * 10 + blockEdge + paintEdge;
+}
 
-  // Factor 8: Experience / continuity proxy
-  // Lower KenPom rank = more seasoned, proven team
-  const expEdge = (d2.kp - d1.kp) * 0.07;
+function scorePace(a: ExtendedStats, b: ExtendedStats): number {
+  // Tempo mismatch: faster team imposes pace
+  const paceEdge = (a.tempo - b.tempo) * 0.04;
+  // Transition frequency advantage
+  const transEdge = (a.transitionFreq - b.transitionFreq) * 5;
+  // Halfcourt efficiency when game slows
+  const hcEdge   = (a.halfcourtEff - b.halfcourtEff) * 3;
+  return paceEdge + transEdge * 0.4 + hcEdge * 0.4;
+}
 
-  // Factor 9: Free throw / drawing fouls proxy
-  // Teams with better offensive efficiency tend to get to the line more
-  // Use aO delta as proxy since we don't have FT% directly
-  const ftEdge = (d1.aO - d2.aO) * 0.04;
+function scoreSOS(a: ExtendedStats, b: ExtendedStats): number {
+  // Strength of schedule gap
+  const sosEdge = (a.sos - b.sos) * 0.06;
+  // Win % vs quality opponents
+  const top25Edge = (a.recVsTop25 - b.recVsTop25) * 4;
+  const top50Edge = (a.recVsTop50 - b.recVsTop50) * 2;
+  return sosEdge + top25Edge * 0.5 + top50Edge * 0.3;
+}
 
-  // Factor 10: Strength of schedule proxy
-  // KenPom rank already incorporates SOS — amplify experience edge
-  const sosEdge = (d2.kp - d1.kp) * 0.05;
+function scoreExperience(a: ExtendedStats, b: ExtendedStats): number {
+  // Overall experience edge
+  const expEdge       = (a.experience - b.experience) * 0.06;
+  // Roster continuity
+  const contEdge      = (a.rosterContinuity - b.rosterContinuity) * 0.04;
+  // Coaching quality
+  const coachEdge     = (a.coachingEdge - b.coachingEdge) * 0.05;
+  // Close game record
+  const clutchEdge    = (a.closeGameRecord - b.closeGameRecord) * 6;
+  // Neutral site performance
+  const neutralEdge   = (a.neutralSitePerf - b.neutralSitePerf) * 4;
+  return expEdge + contEdge + coachEdge + clutchEdge * 0.3 + neutralEdge * 0.2;
+}
 
-  // Style interaction bonuses (matchup-specific, not just raw ratings)
-  let interactionBonus = 0;
+/* ================================================================
+   MATCHUP INTERACTION BONUSES
+   Style vs style effects that override pure category scores.
+   These fire on top of the weighted composite.
+================================================================ */
+function matchupInteractionBonus(a: ExtendedStats, b: ExtendedStats): number {
+  let bonus = 0;
 
-  // Elite 3PT shooting vs weak perimeter defense
-  if (d1.t3 >= 37 && d2.aD >= 93) interactionBonus += 2.2;
-  if (d2.t3 >= 37 && d1.aD >= 93) interactionBonus -= 2.2;
+  // 1. Elite 3PT shooting vs weak perimeter defense
+  if (a.threePct >= 37 && b.opp3Pct >= 35)   bonus += 2.0;
+  if (b.threePct >= 37 && a.opp3Pct >= 35)   bonus -= 2.0;
 
-  // Dominant rebounding vs poor rebounding
-  if (d1.oR >= 31 && d2.oR <= 25) interactionBonus += 1.8;
-  if (d2.oR >= 31 && d1.oR <= 25) interactionBonus -= 1.8;
+  // 2. High 3PT attempt rate vs poor perimeter D (amplifies variance)
+  if (a.threeAR >= 0.38 && b.opp3Pct >= 34)  bonus += 1.2;
+  if (b.threeAR >= 0.38 && a.opp3Pct >= 34)  bonus -= 1.2;
 
-  // Pressure defense vs turnover-prone offense
-  if (d1.aD <= 90 && d2.to >= 16) interactionBonus += 2.0;
-  if (d2.aD <= 90 && d1.to >= 16) interactionBonus -= 2.0;
+  // 3. Dominant offensive rebounding vs poor defensive rebounding
+  if (a.oRebPct >= 32 && b.dRebPct <= 68)    bonus += 1.8;
+  if (b.oRebPct >= 32 && a.dRebPct <= 68)    bonus -= 1.8;
 
-  // Pace mismatch — very slow vs very fast
-  if (Math.abs(d1.tp - d2.tp) >= 8) {
-    interactionBonus += (d1.tp > d2.tp ? 1 : -1) * 0.8;
-  }
+  // 4. Pressure defense vs turnover-prone offense
+  if (a.defTOrate >= 20 && b.toRate >= 16)    bonus += 2.2;
+  if (b.defTOrate >= 20 && a.toRate >= 16)    bonus -= 2.2;
 
-  // Weighted composite score
+  // 5. Interior scoring vs rim protection
+  if (a.rimFinish >= 0.65 && b.blockRate >= 10) bonus -= 1.0; // blocked
+  if (b.rimFinish >= 0.65 && a.blockRate >= 10) bonus += 1.0;
+
+  // 6. Fast tempo vs slow tempo (pace imposition)
+  if (a.tempo >= 75 && b.tempo <= 64)         bonus += 1.5;
+  if (b.tempo >= 75 && a.tempo <= 64)         bonus -= 1.5;
+
+  // 7. Free throw reliant vs foul-prone defense
+  if (a.ftRate >= 0.35 && b.oppFoulRate >= 0.28) bonus += 1.3;
+  if (b.ftRate >= 0.35 && a.oppFoulRate >= 0.28) bonus -= 1.3;
+
+  // 8. Elite defense vs high-variance shooting team
+  if (a.aD <= 89 && b.shotVariance >= 0.7)    bonus += 1.5;
+  if (b.aD <= 89 && a.shotVariance >= 0.7)    bonus -= 1.5;
+
+  // 9. Experience advantage in close games
+  if (a.experience >= 70 && b.experience <= 40) bonus += 1.0;
+  if (b.experience >= 70 && a.experience <= 40) bonus -= 1.0;
+
+  // 10. High assist rate vs disruptive defense (well-run offense vs chaos)
+  if (a.assistRate >= 0.60 && b.stealRate >= 11) bonus -= 0.8;
+  if (b.assistRate >= 0.60 && a.stealRate >= 11) bonus += 0.8;
+
+  return bonus;
+}
+
+/* ================================================================
+   COMPOSITE WIN PROBABILITY
+   Combines all 10 category scores using current weight profile.
+================================================================ */
+function computeWinProb(
+  t1: string,
+  t2: string,
+  w: CategoryWeights,
+  env: EnvWeights
+): number {
+  const s1 = deriveStats(getTeam(t1));
+  const s2 = deriveStats(getTeam(t2));
+
   const composite =
-    effMargin * w.efficiency +
-    offGap    * w.offense    +
-    defGap    * w.defense    +
-    shoot3    * w.shooting3  +
-    toEdge    * w.turnover   +
-    rebEdge   * w.rebounding +
-    paceEdge  * w.pace       +
-    expEdge   * w.experience +
-    ftEdge    * w.ft         +
-    sosEdge   * w.sos        +
-    interactionBonus;
+    scoreEfficiency(s1, s2)      * w.efficiency   +
+    scoreShooting(s1, s2)        * w.shooting      +
+    scoreShootingVariance(s1, s2)* w.shootingVar   +
+    scoreTurnovers(s1, s2)       * w.turnovers     +
+    scoreRebounding(s1, s2)      * w.rebounding    +
+    scoreFreeThrow(s1, s2)       * w.freeThrow     +
+    scoreInterior(s1, s2)        * w.interior      +
+    scorePace(s1, s2)            * w.pace          +
+    scoreSOS(s1, s2)             * w.sos           +
+    scoreExperience(s1, s2)      * w.experience    +
+    matchupInteractionBonus(s1, s2);
 
-  // Softer logistic: scale=13 → large efficiency gaps don't overwhelm noise
-  return 1 / (1 + Math.exp(-composite / 13));
+  return 1 / (1 + Math.exp(-composite / env.scaleFactor));
 }
 
 /* ================================================================
    SINGLE GAME SIMULATION
-   Applies realistic game-level variance on top of win probability.
-   Six noise sources, all scaled by current environment.
+   6 independent noise sources calibrated to environment.
 ================================================================ */
-function simGame(t1: string, t2: string, w: WeightProfile, env: EnvProfile): string {
+function simGame(
+  t1: string,
+  t2: string,
+  w: CategoryWeights,
+  env: EnvWeights
+): string {
   if (!t1 || !t2) return t1 || t2;
 
-  let p = computeWinProb(t1, t2, w);
+  let p = computeWinProb(t1, t2, w, env);
 
   // Noise source 1: Shooting night (hot/cold 3PT)
-  p += noise(env.shootingNoise);
+  p += noise(env.shotNoise);
 
   // Noise source 2: Turnover swings
-  p += noise(env.turnoverNoise);
+  p += noise(env.toNoise);
 
   // Noise source 3: Foul trouble / free throw variance
   p += noise(env.foulNoise);
 
   // Noise source 4: Rebounding swings
-  p += noise(env.reboundNoise);
+  p += noise(env.rebNoise);
 
-  // Noise source 5: General game chaos
-  p += noise(env.gameNoise);
+  // Noise source 5: General game chaos / momentum
+  p += noise(env.baseNoise);
 
-  // Noise source 6: Momentum / crowd / neutral-site variance
-  p += noise(0.06);
+  // Noise source 6: Neutral-site crowd / officiating variance
+  p += noise(0.05);
 
-  // Cinderella boost — lower-seeded teams get occasional random lift
+  // Cinderella factor: lower seeds get random upset boost
   const d1 = getTeam(t1);
   const d2 = getTeam(t2);
-  if (d2.s > d1.s + 3 && Math.random() < env.cinderellaBoost) {
-    p -= rnd(0.06, 0.22); // upset boost for lower seed
+  if (d2.s > d1.s + 3 && Math.random() < env.cinderella) {
+    p -= rnd(0.04, 0.20); // underdog boost
   }
-  if (d1.s > d2.s + 3 && Math.random() < env.cinderellaBoost) {
-    p += rnd(0.06, 0.22);
+  if (d1.s > d2.s + 3 && Math.random() < env.cinderella) {
+    p += rnd(0.04, 0.20);
   }
 
-  // Hard floor: every team has at least 3% chance no matter what
-  p = Math.max(0.03, Math.min(0.97, p));
+  // Hard floor: every team has at least 3% chance
+  p = clamp(p, 0.03, 0.97);
 
   return Math.random() < p ? t1 : t2;
 }
 
 /* ================================================================
-   REGION SIMULATION (4 rounds: R1 → R2 → S16 → E8)
+   REGION SIMULATION (4 rounds)
 ================================================================ */
-function simRegion(r1ids: string[], w: WeightProfile, env: EnvProfile): string {
+function simRegion(
+  r1ids: string[],
+  w: CategoryWeights,
+  env: EnvWeights
+): { winner: string; r2: string[]; s16: string[] } {
   // Round 1
   const r1w = r1ids.map(id => {
     const m = MATCHUPS[id];
@@ -307,9 +431,7 @@ function simRegion(r1ids: string[], w: WeightProfile, env: EnvProfile): string {
 
   // Round 2
   const r2: string[] = [];
-  for (let i = 0; i < 8; i += 2) {
-    r2.push(simGame(r1w[i], r1w[i + 1], w, env));
-  }
+  for (let i = 0; i < 8; i += 2) r2.push(simGame(r1w[i], r1w[i + 1], w, env));
 
   // Sweet 16
   const s16 = [
@@ -318,54 +440,138 @@ function simRegion(r1ids: string[], w: WeightProfile, env: EnvProfile): string {
   ];
 
   // Elite 8
-  return simGame(s16[0], s16[1], w, env);
+  const winner = simGame(s16[0], s16[1], w, env);
+
+  return { winner, r2, s16 };
 }
 
 /* ================================================================
    FULL TOURNAMENT SIMULATION
-   Runs n tournaments with fresh environment + weights each time.
-   Tracks: champions, Final Four, Sweet 16 appearances.
 ================================================================ */
 export interface FullSimResult extends SimResult {
-  s16: Record<string, number>;
+  s16:          Record<string, number>;
   environments: Record<string, number>;
+  upsetFreq:    number;  // % of first-round games won by higher seed
 }
 
 export function runSimulation(n: number): FullSimResult {
   const champs: Record<string, number> = {};
   const f4:     Record<string, number> = {};
-  const s16:    Record<string, number> = {};
-  const environments: Record<string, number> = {};
+  const s16c:   Record<string, number> = {};
+  const envCnt: Record<string, number> = {};
+  let totalUpsets = 0;
+  let totalR1Games = 0;
 
   for (let i = 0; i < n; i++) {
-    // Fresh environment + weight profile every single tournament run
-    const env = pickEnvironment();
-    const w   = buildWeights(env);
+    const envName = pickEnvironment();
+    const envW    = ENV_WEIGHTS[envName];
+    const w       = buildWeights(envW);
 
-    environments[env.name] = (environments[env.name] || 0) + 1;
+    envCnt[envName] = (envCnt[envName] || 0) + 1;
 
-    // Simulate all 4 regions
-    const e  = simRegion(EAST_R1,    w, env);
-    const s  = simRegion(SOUTH_R1,   w, env);
-    const ww = simRegion(WEST_R1,    w, env);
-    const mw = simRegion(MIDWEST_R1, w, env);
+    const eR  = simRegion(EAST_R1,    w, envW);
+    const sR  = simRegion(SOUTH_R1,   w, envW);
+    const wR  = simRegion(WEST_R1,    w, envW);
+    const mwR = simRegion(MIDWEST_R1, w, envW);
 
-    // Track Final Four appearances
-    [e, s, ww, mw].forEach(t => { f4[t] = (f4[t] || 0) + 1; });
+    // Track Final Four
+    [eR.winner, sR.winner, wR.winner, mwR.winner].forEach(t => {
+      f4[t] = (f4[t] || 0) + 1;
+    });
 
-    // Track approximate Sweet 16 (R2 winners per region — 2 per region)
-    // Simplified: track Final Four + one more round back
-    [e, s, ww, mw].forEach(t => { s16[t] = (s16[t] || 0) + 1; });
+    // Track Sweet 16
+    [...eR.s16, ...sR.s16, ...wR.s16, ...mwR.s16].forEach(t => {
+      s16c[t] = (s16c[t] || 0) + 1;
+    });
 
-    // Final Four games
-    const ff1   = simGame(e,  s,  w, env);
-    const ff2   = simGame(ww, mw, w, env);
-    const champ = simGame(ff1, ff2, w, env);
+    // Count R1 upsets (higher seed winning)
+    const allR1 = [...EAST_R1, ...SOUTH_R1, ...WEST_R1, ...MIDWEST_R1];
+    for (const id of allR1) {
+      const m = MATCHUPS[id];
+      const winner = simGame(m.t1, m.t2, w, envW);
+      totalR1Games++;
+      const d1 = getTeam(m.t1), d2 = getTeam(m.t2);
+      if ((winner === m.t1 && d1.s > d2.s) || (winner === m.t2 && d2.s > d1.s)) {
+        totalUpsets++;
+      }
+    }
+
+    // Final Four + Championship
+    const ff1   = simGame(eR.winner,  sR.winner,  w, envW);
+    const ff2   = simGame(wR.winner,  mwR.winner, w, envW);
+    const champ = simGame(ff1, ff2, w, envW);
 
     champs[champ] = (champs[champ] || 0) + 1;
   }
 
-  return { champs, f4, s16, environments, n };
+  const upsetFreq = totalR1Games > 0 ? totalUpsets / totalR1Games : 0;
+
+  return { champs, f4, s16: s16c, environments: envCnt, upsetFreq, n };
+}
+
+/* ================================================================
+   SINGLE GAME ANALYSIS — used by sidebar for live matchup data
+================================================================ */
+export function analyzeMatchup(t1: string, t2: string): {
+  winProb: number;
+  upsetProb: number;
+  keyEdges: { cat: string; team: string; edge: string }[];
+  summary: string;
+} {
+  const s1 = deriveStats(getTeam(t1));
+  const s2 = deriveStats(getTeam(t2));
+
+  // Use balanced environment for display
+  const w = buildWeights(ENV_WEIGHTS.balanced);
+  const env = ENV_WEIGHTS.balanced;
+
+  const winP = computeWinProb(t1, t2, w, env);
+  const upsetP = winP < 0.5 ? winP : 1 - winP;
+
+  // Calculate individual category scores for edge display
+  const catScores: { cat: string; score: number }[] = [
+    { cat: "Efficiency",     score: scoreEfficiency(s1, s2) },
+    { cat: "Shooting",       score: scoreShooting(s1, s2) },
+    { cat: "Shot Variance",  score: scoreShootingVariance(s1, s2) },
+    { cat: "Turnovers",      score: scoreTurnovers(s1, s2) },
+    { cat: "Rebounding",     score: scoreRebounding(s1, s2) },
+    { cat: "Free Throws",    score: scoreFreeThrow(s1, s2) },
+    { cat: "Interior",       score: scoreInterior(s1, s2) },
+    { cat: "Pace",           score: scorePace(s1, s2) },
+    { cat: "Schedule",       score: scoreSOS(s1, s2) },
+    { cat: "Experience",     score: scoreExperience(s1, s2) },
+  ];
+
+  const keyEdges = catScores
+    .filter(c => Math.abs(c.score) > 0.5)
+    .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
+    .slice(0, 5)
+    .map(c => ({
+      cat:  c.cat,
+      team: c.score > 0 ? t1 : t2,
+      edge: `+${Math.abs(c.score).toFixed(1)}`,
+    }));
+
+  // Generate summary text
+  const favored   = winP >= 0.5 ? t1 : t2;
+  const underdog  = winP >= 0.5 ? t2 : t1;
+  const pct       = Math.round(Math.max(winP, 1 - winP) * 100);
+  const topEdge   = keyEdges[0];
+
+  let summary = `${favored} is favored at ${pct}% based on a 10-factor composite model.`;
+  if (topEdge) summary += ` The biggest advantage is ${topEdge.cat.toLowerCase()} (${topEdge.team} leads).`;
+
+  // Add style interaction note if relevant
+  if (s1.threePct >= 37 && s2.opp3Pct >= 35)
+    summary += ` ${t1}'s elite 3PT shooting exploits ${t2}'s soft perimeter defense.`;
+  else if (s2.threePct >= 37 && s1.opp3Pct >= 35)
+    summary += ` ${t2}'s elite 3PT shooting exploits ${t1}'s soft perimeter defense.`;
+  else if (s1.oRebPct >= 32 && s2.dRebPct <= 68)
+    summary += ` ${t1} dominates the glass against a team that struggles to box out.`;
+  else if (s2.oRebPct >= 32 && s1.dRebPct <= 68)
+    summary += ` ${t2} dominates the glass against a team that struggles to box out.`;
+
+  return { winProb: winP, upsetProb: upsetP, keyEdges, summary };
 }
 
 export function sortedEntries(obj: Record<string, number>, top: number) {

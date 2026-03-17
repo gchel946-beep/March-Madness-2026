@@ -352,14 +352,14 @@ function matchupInteractionBonus(a: ExtendedStats, b: ExtendedStats): number {
 ================================================================ */
 function seedQualityBonus(kp1: number, seed1: number, kp2: number, seed2: number): number {
   // Seed-based component (lower seed number = better = positive)
-  const seedEdge = (seed2 - seed1) * 0.18;
+  const seedEdge = (seed2 - seed1) * 0.34;
 
   // KenPom rank component (lower rank = better = positive)
   // Scale so a #1 vs #100 gap adds ~2.0 points
-  const kpEdge = (kp2 - kp1) * 0.022;
+  const kpEdge = (kp2 - kp1) * 0.044;
 
-  // Combined — cap at ±3.5 so it can't fully override a bad matchup
-  return Math.max(-3.5, Math.min(3.5, seedEdge + kpEdge));
+  // Combined — cap at ±5.0 so it can't fully override a bad matchup
+  return Math.max(-6.5, Math.min(6.5, seedEdge + kpEdge));
 }
 
 /* ================================================================

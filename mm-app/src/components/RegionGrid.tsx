@@ -2,7 +2,7 @@
 
 import MatchupPair from "@/components/MatchupPair";
 import { useBracket } from "@/store/useBracket";
-import { MATCHUPS } from "@/data/matchups";
+import { resolveR1Teams } from "@/data/matchups";
 
 interface Props {
   prefix: string;
@@ -19,7 +19,10 @@ function RoundHeader({ label }: { label: string }) {
 }
 
 export default function RegionGrid({ prefix, r1ids, rtl = false }: Props) {
-  const { winner } = useBracket();
+  const { winner, picks } = useBracket();
+
+  // Resolve R1 teams — substitutes First Four winners where applicable
+  const r1teams: [string, string][] = r1ids.map(id => resolveR1Teams(id, picks));
 
   const r2ids = r1ids.map((_, i) => `${prefix}-r2-${i}`);
   const r2t: [string, string][] = [];
@@ -39,14 +42,14 @@ export default function RegionGrid({ prefix, r1ids, rtl = false }: Props) {
   return (
     <div className={`flex items-start ${rtl ? "flex-row-reverse" : ""}`}>
 
-      {/* Round 1 */}
+      {/* Round 1 — uses resolved teams (FF4 winners flow in here) */}
       <div style={{ width: 172 }}>
         <RoundHeader label="ROUND 1" />
         {r1ids.map((id, i) => {
-          const m = MATCHUPS[id];
+          const [t1, t2] = r1teams[i];
           return (
             <div key={id}>
-              <MatchupPair matchupId={id} team1={m?.t1 ?? ""} team2={m?.t2 ?? ""} />
+              <MatchupPair matchupId={id} team1={t1} team2={t2} />
               {i < 7 && <div style={{ height: 4 }} />}
             </div>
           );

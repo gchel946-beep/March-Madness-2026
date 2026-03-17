@@ -143,7 +143,7 @@ export default function Sidebar() {
         <div className="flex items-start gap-2 mb-3">
           <div className="flex-1 bg-s2 border border-br rounded p-2 text-center">
             <div className="font-mono text-[9px] text-tx3 mb-1">#{d1.s} SEED</div>
-            <div className="text-base font-bold leading-tight">{t1}</div>
+            <div className="text-base font-bold leading-tight text-white">{t1}</div>
             <div className="font-mono text-[9px] text-tx3 mt-1">{d1.r}</div>
           </div>
           {d2 && (<>

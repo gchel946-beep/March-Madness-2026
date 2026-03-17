@@ -9,7 +9,7 @@
 import { SimResult } from "@/types";
 import { getTeam } from "@/data/teams";
 import { deriveStats, ExtendedStats } from "@/lib/derived";
-import { MATCHUPS, EAST_R1, WEST_R1, MIDWEST_R1, SOUTH_R1 } from "@/data/matchups";
+import { MATCHUPS, EAST_R1, WEST_R1, MIDWEST_R1, SOUTH_R1, FIRST_FOUR } from "@/data/matchups";
 
 function rnd(min: number, max: number) { return min + Math.random() * (max - min); }
 function noise(scale: number) { return (Math.random() - 0.5) * 2 * scale; }
@@ -417,15 +417,25 @@ function simGame(
 
 /* ================================================================
    REGION SIMULATION (4 rounds)
+   resolvedR1 maps r1id → [t1,t2] overrides (for First Four winners)
 ================================================================ */
 function simRegion(
   r1ids: string[],
   w: CategoryWeights,
-  env: EnvWeights
+  env: EnvWeights,
+  resolvedR1?: Record<string, [string, string]>
 ): { winner: string; r2: string[]; s16: string[] } {
-  // Round 1
+  // Round 1 — use resolved teams if provided (handles FF4 placeholders)
   const r1w = r1ids.map(id => {
+    if (resolvedR1 && resolvedR1[id]) {
+      const [t1, t2] = resolvedR1[id];
+      if (t1 && t2 && !t1.includes("/") && !t2.includes("/")) {
+        return simGame(t1, t2, w, env);
+      }
+    }
     const m = MATCHUPS[id];
+    // Skip games with placeholder teams (unresolved FF4)
+    if (!m.t1 || !m.t2 || m.t2 === "FF4-Winner") return m.t1 || "";
     return simGame(m.t1, m.t2, w, env);
   });
 
@@ -446,15 +456,42 @@ function simRegion(
 }
 
 /* ================================================================
+   BUILD FIRST FOUR RESOLVED MAP
+   Simulates all 4 First Four games and returns a map of
+   r1id → [t1, t2] with winners substituted in.
+================================================================ */
+function resolveFF4ForSim(
+  w: CategoryWeights,
+  env: EnvWeights,
+  userPicks?: Record<string, string>
+): Record<string, [string, string]> {
+  const resolved: Record<string, [string, string]> = {};
+  FIRST_FOUR.forEach(g => {
+    // Use user's pick if available, otherwise simulate the game
+    const winner = userPicks?.[g.id] ?? simGame(g.t1, g.t2, w, env);
+    const m = MATCHUPS[g.targetsR1];
+    if (!m) return;
+    const t1 = g.targetsPos === "t1" ? winner : m.t1;
+    const t2 = g.targetsPos === "t2" ? winner : m.t1;
+    // Reconstruct the full matchup with winner in the right slot
+    resolved[g.targetsR1] = [
+      g.targetsPos === "t1" ? winner : m.t1,
+      g.targetsPos === "t2" ? winner : m.t2,
+    ];
+  });
+  return resolved;
+}
+
+/* ================================================================
    FULL TOURNAMENT SIMULATION
 ================================================================ */
 export interface FullSimResult extends SimResult {
   s16:          Record<string, number>;
   environments: Record<string, number>;
-  upsetFreq:    number;  // % of first-round games won by higher seed
+  upsetFreq:    number;
 }
 
-export function runSimulation(n: number): FullSimResult {
+export function runSimulation(n: number, userPicks?: Record<string, string>): FullSimResult {
   const champs: Record<string, number> = {};
   const f4:     Record<string, number> = {};
   const s16c:   Record<string, number> = {};
@@ -469,43 +506,46 @@ export function runSimulation(n: number): FullSimResult {
 
     envCnt[envName] = (envCnt[envName] || 0) + 1;
 
-    const eR  = simRegion(EAST_R1,    w, envW);
-    const sR  = simRegion(SOUTH_R1,   w, envW);
-    const wR  = simRegion(WEST_R1,    w, envW);
-    const mwR = simRegion(MIDWEST_R1, w, envW);
+    // Simulate First Four games first, respect user picks where made
+    const resolvedR1 = resolveFF4ForSim(w, envW, userPicks);
+
+    const eR  = simRegion(EAST_R1,    w, envW, resolvedR1);
+    const sR  = simRegion(SOUTH_R1,   w, envW, resolvedR1);
+    const wR  = simRegion(WEST_R1,    w, envW, resolvedR1);
+    const mwR = simRegion(MIDWEST_R1, w, envW, resolvedR1);
 
     // Track Final Four
     [eR.winner, sR.winner, wR.winner, mwR.winner].forEach(t => {
-      f4[t] = (f4[t] || 0) + 1;
+      if (t) f4[t] = (f4[t] || 0) + 1;
     });
 
     // Track Sweet 16
     [...eR.s16, ...sR.s16, ...wR.s16, ...mwR.s16].forEach(t => {
-      s16c[t] = (s16c[t] || 0) + 1;
+      if (t) s16c[t] = (s16c[t] || 0) + 1;
     });
 
-    // Count R1 upsets (higher seed winning)
+    // Count R1 upsets
     const allR1 = [...EAST_R1, ...SOUTH_R1, ...WEST_R1, ...MIDWEST_R1];
     for (const id of allR1) {
-      const m = MATCHUPS[id];
-      const winner = simGame(m.t1, m.t2, w, envW);
+      const teams = resolvedR1[id] ?? [MATCHUPS[id]?.t1 ?? "", MATCHUPS[id]?.t2 ?? ""];
+      const [t1, t2] = teams;
+      if (!t1 || !t2 || t1.includes("/") || t2.includes("/")) continue;
+      const winner2 = simGame(t1, t2, w, envW);
       totalR1Games++;
-      const d1 = getTeam(m.t1), d2 = getTeam(m.t2);
-      if ((winner === m.t1 && d1.s > d2.s) || (winner === m.t2 && d2.s > d1.s)) {
+      const d1 = getTeam(t1), d2 = getTeam(t2);
+      if ((winner2 === t1 && d1.s > d2.s) || (winner2 === t2 && d2.s > d1.s)) {
         totalUpsets++;
       }
     }
 
-    // Final Four + Championship
     const ff1   = simGame(eR.winner,  sR.winner,  w, envW);
     const ff2   = simGame(wR.winner,  mwR.winner, w, envW);
     const champ = simGame(ff1, ff2, w, envW);
 
-    champs[champ] = (champs[champ] || 0) + 1;
+    if (champ) champs[champ] = (champs[champ] || 0) + 1;
   }
 
   const upsetFreq = totalR1Games > 0 ? totalUpsets / totalR1Games : 0;
-
   return { champs, f4, s16: s16c, environments: envCnt, upsetFreq, n };
 }
 

@@ -150,7 +150,7 @@ export default function Sidebar() {
             <div className="text-[11px] font-semibold text-tx3 pt-4 flex-shrink-0">vs</div>
             <div className="flex-1 bg-s2 border border-br rounded p-2 text-center">
               <div className="font-mono text-[9px] text-tx3 mb-1">#{d2.s} SEED</div>
-              <div className="text-base font-bold leading-tight">{t2}</div>
+              <div className="text-base font-bold leading-tight text-white">{t2}</div>
               <div className="font-mono text-[9px] text-tx3 mt-1">{d2.r}</div>
             </div>
           </>)}
